@@ -10,7 +10,7 @@ Endpoints: POST /receipts, POST /calls, POST /revoke, GET /ledger, GET /verify (
 Tests: 11 in test/gate.test.js (N_out=8 out-of-scope incl. wide-mint, N_in=3 in-scope; spec §8 says 10, the case-insensitivity test is kept in addition; "refused before execution" = REFUSED and Gmail send count unchanged) plus evidence checks. Pass/fail checklist, not a rate claim.
 Limits: receipt_id is a bearer token (not bound to subagent identity); bypass is advisory.
 
-Gate order: no_receipt → unknown → parent_revoked → expired → replay (op_id = sha256(receipt_id+tool+canonical(args))) → tool/recipient/invoice scope → max_sends → ALLOW (mock Gmail, ledger row).
+Gate order: no_receipt → unknown_receipt → parent_revoked → expired → redelegation_forbidden → in_flight (PENDING op) / replay (EXECUTED op, op_id = sha256(receipt_id+tool+canonical(args))) → tool/recipient/invoice scope → limit_exceeded (reserved sends ≥ max_sends) → write PENDING (unique on op_id) → ALLOW (mock Gmail) → EXECUTED, or FAILED on upstream error (reservation released, retry allowed).
 Revoked/expired are checked before replay so a dead receipt never replays. The "direct Gmail key" toggle bypasses the gate and leaves no ledger row: enforcement is advisory in V1.
 
 ## Hardening (V1-D-04 / V1-D-05)

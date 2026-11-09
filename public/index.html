@@ -11,6 +11,13 @@ section{background:#fff;border-radius:8px;padding:14px;box-shadow:0 1px 3px #000
 h2{margin:0 0 8px;font-size:15px}button{margin:3px 3px 3px 0;padding:6px 10px;cursor:pointer}
 table{width:100%;border-collapse:collapse;font-size:12px}td,th{padding:4px;border-bottom:1px solid #eee;text-align:left}
 .ALLOWED,.ok{color:#0a7d33}.REFUSED,.bad{color:#c0392b}.REPLAYED{color:#b7791f}.REVOKED{color:#6b21a8}
+.verdict{font-size:28px;font-weight:800;padding:14px 16px;border-radius:10px;margin:10px 0;line-height:1.25}
+.verdict small{display:block;font-size:14px;font-weight:600;margin-top:4px}
+.verdict.refused{background:#fdecea;color:#8f1d14;border:2px solid #c0392b}
+.verdict.allowed{background:#e6f4ea;color:#0a5c22;border:2px solid #0a7d33}
+.verdict.replayed{background:#fef6e0;color:#7a5b00;border:2px solid #b7791f}
+.verdict.failed{background:#f3e8ff;color:#4a1d96;border:2px solid #6b21a8}
+.verdict.neutral{background:#eef0f3;color:#1a1a2e;border:2px solid #9aa0a6}
 pre{background:#f0f1f4;padding:8px;overflow:auto;font-size:12px}label{display:block;margin:6px 0}
 </style></head><body>
 <header><b>Delegation Receipt — V1 Light Build</b> · Priya's console</header>
@@ -23,7 +30,7 @@ pre{background:#f0f1f4;padding:8px;overflow:auto;font-size:12px}label{display:bl
 <div id="inv"></div><button onclick="go(1)">Run 1 →</button></section></div>
 
 <div class="screen" id="s1"><section><h2>2. Run 1 — no receipt (standing policy only)</h2>
-<button onclick="run1()">Run scripted subagent</button><pre id="o1"></pre></section></div>
+<button onclick="run1()">Run scripted subagent</button><div id="v1"></div><pre id="o1"></pre></section></div>
 
 <div class="screen" id="s2"><section><h2>3. Run 2 — with a receipt</h2>
 <p>Receipt: <code>billing@acme.example</code>, <code>INV-123</code>, max_sends=1, 10-minute expiry, no re-delegation.</p>
@@ -33,6 +40,7 @@ pre{background:#f0f1f4;padding:8px;overflow:auto;font-size:12px}label{display:bl
 <button onclick="nore()">Call with no receipt</button><button onclick="deleg()">Try to re-delegate</button>
 <label><input type="checkbox" id="bypass"> Use direct Gmail key (bypass gate)</label>
 <button onclick="bp()">Send via direct key (Globex)</button>
+<div id="verdict"></div>
 <div id="receipt">no receipt yet</div><pre id="o2"></pre></section></div>
 
 <div class="screen" id="s3"><section><h2>4. Evidence</h2>
@@ -53,11 +61,27 @@ const A='billing@acme.example';
 function go(n){tab=n;document.querySelectorAll('.screen').forEach((e,i)=>e.classList.toggle('on',i===n));
  $('nav').innerHTML=T.map((t,i)=>`<button class="${i===n?'on':''}" onclick="go(${i})">${i+1}. ${t}</button>`).join('');refresh()}
 async function mint(ttl){cur=await api('/receipts',{recipient:A,invoice_id:'INV-123',max_sends:1,parent_grant_ref:'G-ACME-1',ttl_seconds:ttl});refresh()}
-const out=r=>{$('o2').textContent=J(r);refresh()};
+const out=r=>{banner(r);$('o2').textContent=J(r);refresh()};
+function banner(r){
+  // Big, unmissable verdict: the refusal must read at a glance, without sound.
+  // r is either a /calls result {decision, reason} or a /demo/run result {steps:[{decision, reason, args}]}.
+  let d=null,reason=null,detail='';
+  if(r&&Array.isArray(r.steps)){const s=r.steps[0];d=s.decision;reason=s.reason;detail=`${s.args.to} · ${s.args.invoice_id}`}
+  else if(r){d=r.decision;reason=r.reason;detail=r.result?`${r.result.to} · ${r.result.invoice_id}`:''}
+  const el=$('verdict');if(!el)return;
+  if(!d)return; // keep any banner already shown (e.g. REVOKED set by revoke())
+  if(d==='REFUSED'||d==='REFUSED_MINT'){el.className='verdict refused';el.innerHTML=`⛔ ${d} — no email was sent<small>${reason||''}${detail?' · '+detail:''}</small>`}
+  else if(d==='ALLOWED'){el.className='verdict allowed';el.innerHTML=`✓ ALLOWED — sent once<small>${detail}</small>`}
+  else if(d==='REPLAYED'){el.className='verdict replayed';el.innerHTML=`↩ REPLAYED — same call, no second send<small>${detail}</small>`}
+  else if(d==='FAILED'||d==='in_flight'){el.className='verdict failed';el.innerHTML=`⚠ ${d}<small>${reason||''} · no second upstream call</small>`}
+  else if(d==='UNGOVERNED'){el.className='verdict refused';el.innerHTML=`⛔ UNGOVERNED — direct key, no ledger row<small>${detail} · this is the bypass, shown honestly</small>`}
+  else if(d==='ALLOWED_BY_STANDING_POLICY'){el.className='verdict refused';el.innerHTML=`⛔ SENT UNDER STANDING POLICY — no receipt, no per-task limit<small>${detail}</small>`}
+  else{el.className='verdict neutral';el.innerHTML=`${d}<small>${reason||''}</small>`}
+}
 const c=(args,tool='send_email',id=cur?.id)=>api('/calls',{receipt_id:id,tool,args});
-async function run1(){await api('/reset',{});cur=null;$('o1').textContent=J(await api('/demo/run',{mode:'no_receipt'}))+'\n\nGlobex got the invoice email. Nothing limited this task; no per-task record exists.';refresh()}
+async function run1(){await api('/reset',{});cur=null;const r=await api('/demo/run',{mode:'no_receipt'});$('v1').className='verdict refused';$('v1').innerHTML=`⛔ SENT UNDER STANDING POLICY — no receipt, no per-task limit<small>Globex got the invoice email. Nothing limited this task; no per-task record exists.</small>`;$('o1').textContent=J(r)+'\n\nGlobex got the invoice email. Nothing limited this task; no per-task record exists.';refresh()}
 async function run2(){if(!cur)await mint(600);out(await api('/demo/run',{mode:'receipt',receipt_id:cur.id}))}
-async function revoke(){if(cur){await api('/revoke',{receipt_id:cur.id});out({revoked:cur.id})}}
+async function revoke(){if(cur){await api('/revoke',{receipt_id:cur.id});$('verdict').className='verdict failed';$('verdict').innerHTML=`⚠ REVOKED — parent revoked, child receipt is dead<small>Next child call will be refused parent_revoked.</small>`;out({revoked:cur.id})}}
 async function retry(){out(await c({invoice_id:'INV-123',to:A}))}
 async function over(){out(await c({to:A,invoice_id:'INV-123',note:'second'}))}
 async function nore(){out(await c({to:A,invoice_id:'INV-123'},'send_email',undefined))}
