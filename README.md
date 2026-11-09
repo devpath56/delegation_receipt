@@ -44,7 +44,7 @@ The receipt fixes the gap between those two:
 
 This is V1: the receipt *logic*, in a UI + Node/SQLite backend with mock Stripe and mock Gmail. It does **not** prove TrueForge spawn hooks, Gateway passthrough, Cedar context, or hosted subagent identity — that is V2. See Limits below.
 
-## Tradeoffs — the Staff PM decisions
+## Design Tradeoffs
 
 | Tradeoff | Chose | Gave up | Why |
 | --- | --- | --- | --- |
