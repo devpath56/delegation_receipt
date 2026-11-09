@@ -1,0 +1,50 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Delegation Receipt V1</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font:14px system-ui,sans-serif;margin:0;background:#f6f7f9;color:#1a1a1a}
+header{background:#1a1a2e;color:#fff;padding:12px 20px}
+.note{background:#fff3cd;padding:8px 20px;font-size:13px}
+main{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px;max-width:1200px;margin:auto}
+@media(max-width:800px){main{grid-template-columns:1fr}}
+section{background:#fff;border-radius:8px;padding:14px;box-shadow:0 1px 3px #0002}
+h2{margin:0 0 8px;font-size:15px}button{margin:3px 3px 3px 0;padding:6px 10px;cursor:pointer}
+table{width:100%;border-collapse:collapse;font-size:12px}td,th{padding:4px;border-bottom:1px solid #eee;text-align:left}
+.ALLOWED{color:#0a7d33}.REFUSED{color:#c0392b}.REPLAYED{color:#b7791f}.REVOKED{color:#6b21a8}
+label{display:block;margin:6px 0}
+</style></head><body>
+<header><b>Delegation Receipt — V1 Light Build</b> · Priya's console</header>
+<div class="note">V1 proves the <b>receipt logic</b> only (plain-code gate + mock Gmail). It does <b>not</b> prove TrueForge spawn hooks, Gateway passthrough, Cedar context, or hosted subagent identity — that is V2.</div>
+<main>
+<section><h2>1. Mint receipt (principal → parent → subagent)</h2>
+<div id="receipt">none yet</div>
+<button onclick="mint(300)">Mint R: Acme / INV-123, max 1</button>
+<button onclick="mint(0)">Mint expired receipt</button>
+<button onclick="revoke()">Revoke parent</button>
+<button onclick="reset()">Reset</button>
+<h2 style="margin-top:14px">2. Subagent calls</h2>
+<label><input type="checkbox" id="bypass"> Use direct Gmail key (bypass gate)</label>
+<button onclick="call('Acme','INV-123')">Send Acme / INV-123</button>
+<button onclick="call('Globex','INV-123')">Send Globex (wrong recipient)</button>
+<button onclick="call('Acme','INV-124')">Send Acme / INV-124 (2nd distinct)</button>
+<button onclick="call('Acme','INV-123',true)">Call with no receipt</button>
+<pre id="out"></pre></section>
+<section><h2>Mock Gmail outbox (<span id="cnt">0</span> sent)</h2><div id="gmail"></div></section>
+<section style="grid-column:1/-1"><h2>Ledger: principal → parent → subagent → call</h2><div id="ledger"></div></section>
+</main>
+<script>
+let cur=null;
+const api=async(p,b)=>(await fetch(p,b===undefined?{}:{method:'POST',body:JSON.stringify(b)})).json();
+async function mint(ttl){cur=await api('/receipts',{recipient:'Acme',invoice_id:'INV-123',max_sends:1,ttl_seconds:ttl});refresh()}
+async function revoke(){if(cur)await api(`/receipts/${cur.id}/revoke`,{});refresh()}
+async function reset(){await api('/reset',{});cur=null;refresh()}
+async function call(to,inv,none){const args={to,invoice_id:inv};
+ const r=document.getElementById('bypass').checked?await api('/bypass/gmail',args)
+  :await api('/calls',{receipt_id:none?undefined:cur?.id,tool:'send_email',args});
+ document.getElementById('out').textContent=JSON.stringify(r,null,1);refresh()}
+async function refresh(){const s=await api('/state');
+ document.getElementById('receipt').textContent=cur?`${cur.id}: ${cur.principal} → ${cur.parent} → ${cur.subagent}; ${cur.tool} to ${cur.recipient} for ${cur.invoice_id}; max_sends=${cur.max_sends}`:'none yet';
+ document.getElementById('cnt').textContent=s.gmail.length;
+ document.getElementById('gmail').innerHTML='<table><tr><th>id<th>to<th>invoice<th>via</tr>'+s.gmail.map(g=>`<tr><td>${g.id}<td>${g.to_addr}<td>${g.invoice_id}<td>${g.via==='direct_key'?'<b class=REFUSED>direct key (no ledger row)</b>':g.via}</tr>`).join('')+'</table>';
+ document.getElementById('ledger').innerHTML='<table><tr><th>#<th>decision<th>reason<th>principal<th>parent<th>subagent<th>receipt<th>call</tr>'+s.ledger.map(l=>`<tr><td>${l.seq}<td class=${l.decision}>${l.decision}<td>${l.reason}<td>${l.principal??''}<td>${l.parent??''}<td>${l.subagent??''}<td>${l.receipt_id??''}<td>${l.tool?l.tool+' '+JSON.stringify(l.args):''}</tr>`).join('')+'</table>'}
+refresh();
+</script></body></html>
