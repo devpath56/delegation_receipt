@@ -41,9 +41,10 @@ pre{background:#f0f1f4;padding:8px;overflow:auto;font-size:12px}label{display:bl
 <h2 style="margin-top:12px">V1 limits (stated honestly)</h2><ul>
 <li><b>receipt_id is a bearer token</b>: any child holding it passes; it is not bound to subagent identity.</li>
 <li><b>Bypass is advisory</b>: a holder of the raw Gmail key skips the gate and leaves no ledger row (see "direct key" rows).</li>
-<li>Tests are self-written pass/fail checks (7/7 out-of-scope refused, 0/3 in-scope wrongly refused), not a rate claim. Run <code>npm test</code>.</li>
+<li>Tests are self-written pass/fail checks (8/8 out-of-scope refused, 0/3 in-scope wrongly refused; 11 tests), not a rate claim. Run <code>npm test</code>.</li>
+<li>Receipt lifecycle: <b>MINTED → ACTIVE → EXECUTED | EXPIRED | REVOKED</b>, derived from ledger/ops rows. Every ledger row carries <code>policy_rev</code>.</li>
 <li>Ledger is hash-chained and append-only in SQLite; <code>GET /verify</code> replays it. Anyone with raw DB write access can still rewrite the whole chain.</li></ul>
-<button onclick="reset()">Reset</button></section></div>
+<button onclick="reset()">Reset (DEMO ONLY: drops the append-only triggers and wipes the ledger)</button></section></div>
 <script>
 let cur=null,tab=0;const T=['Stakes','Run 1: no receipt','Run 2: receipt','Evidence'];
 const $=id=>document.getElementById(id),J=x=>JSON.stringify(x,null,1);
@@ -51,7 +52,7 @@ const api=async(p,b)=>(await fetch(p,b===undefined?{}:{method:'POST',body:JSON.s
 const A='billing@acme.example';
 function go(n){tab=n;document.querySelectorAll('.screen').forEach((e,i)=>e.classList.toggle('on',i===n));
  $('nav').innerHTML=T.map((t,i)=>`<button class="${i===n?'on':''}" onclick="go(${i})">${i+1}. ${t}</button>`).join('');refresh()}
-async function mint(ttl){cur=await api('/receipts',{recipient:A,invoice_id:'INV-123',max_sends:1,ttl_seconds:ttl});refresh()}
+async function mint(ttl){cur=await api('/receipts',{recipient:A,invoice_id:'INV-123',max_sends:1,parent_grant_ref:'G-ACME-1',ttl_seconds:ttl});refresh()}
 const out=r=>{$('o2').textContent=J(r);refresh()};
 const c=(args,tool='send_email',id=cur?.id)=>api('/calls',{receipt_id:id,tool,args});
 async function run1(){await api('/reset',{});cur=null;$('o1').textContent=J(await api('/demo/run',{mode:'no_receipt'}))+'\n\nGlobex got the invoice email. Nothing limited this task; no per-task record exists.';refresh()}
@@ -65,7 +66,7 @@ async function bp(){out(await api('/bypass/gmail',{to:'billing@globex.example',i
 async function reset(){await api('/reset',{});cur=null;refresh()}
 async function refresh(){const s=await api('/state');
  $('inv').innerHTML='<table><tr><th>invoice<th>customer<th>email<th>overdue</tr>'+(await api('/stripe/list_overdue_invoices')).map(i=>`<tr><td>${i.invoice_id}<td>${i.customer}<td>${i.email}<td>${i.overdue_days}d</tr>`).join('')+'</table>';
- $('receipt').textContent=cur?`${cur.id}: ${cur.principal} → ${cur.parent} → ${cur.subagent}; ${cur.tool} to ${cur.recipient} for ${cur.invoice_id}; max_sends=${cur.max_sends}`:'no receipt yet';
+ $('receipt').innerHTML=cur?`${cur.id}: ${cur.principal} → ${cur.parent} → ${cur.subagent}; ${cur.tool} to ${cur.recipient} for ${cur.invoice_id}; max_sends=${cur.max_sends}; grant ${cur.parent_grant_ref}; state <b>${(s.receipts.find(r=>r.id===cur.id)||cur).state}</b> (sends_so_far ${(s.receipts.find(r=>r.id===cur.id)||cur).sends_so_far})`:'no receipt yet';
  $('cnt').textContent=s.gmail.length;
  $('vf').innerHTML=s.verify.ok?`<span class=ok>verified (${s.verify.rows} rows)</span>`:`<span class=bad>BROKEN at row ${s.verify.broken_at}</span>`;
  $('gmail').innerHTML='<table><tr><th>id<th>to<th>invoice<th>via</tr>'+s.gmail.map(g=>`<tr><td>${g.id}<td>${g.to_addr}<td>${g.invoice_id}<td>${g.via==='direct_key'?'<b class=bad>direct key (no ledger row)</b>':g.via==='admin_policy'?'<b class=bad>standing policy (no receipt)</b>':g.via}</tr>`).join('')+'</table>';

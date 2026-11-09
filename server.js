@@ -5,15 +5,18 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
-function createApp(dbPath = ':memory:') {
+const POLICY_REV = 'v1.1'; // stamped on every ledger row (V1-D-04)
+
+function createApp(dbPath = ':memory:', opts = {}) {
   const db = new DatabaseSync(dbPath);
   db.exec(`
     CREATE TABLE IF NOT EXISTS receipts (id TEXT PRIMARY KEY, principal TEXT, parent TEXT, subagent TEXT,
-      tool TEXT, recipient TEXT, invoice_id TEXT, max_sends INTEGER, sends INTEGER DEFAULT 0,
+      tool TEXT, recipient TEXT, invoice_id TEXT, max_sends INTEGER, parent_grant_ref TEXT,
       expires_at INTEGER, revoked INTEGER DEFAULT 0);
-    CREATE TABLE IF NOT EXISTS ops (op_id TEXT PRIMARY KEY, receipt_id TEXT, result TEXT);
+    -- PENDING is written (unique on op_id) BEFORE the upstream call; EXECUTED/FAILED after. sends_so_far is derived from these rows.
+    CREATE TABLE IF NOT EXISTS ops (op_id TEXT PRIMARY KEY, receipt_id TEXT, status TEXT, result TEXT);
     CREATE TABLE IF NOT EXISTS ledger (seq INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, decision TEXT, reason TEXT,
-      principal TEXT, parent TEXT, subagent TEXT, receipt_id TEXT, tool TEXT, args TEXT, op_id TEXT, prev_hash TEXT, hash TEXT);
+      principal TEXT, parent TEXT, subagent TEXT, receipt_id TEXT, tool TEXT, args TEXT, op_id TEXT, policy_rev TEXT, prev_hash TEXT, hash TEXT);
     CREATE TABLE IF NOT EXISTS gmail (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, to_addr TEXT, invoice_id TEXT, via TEXT);
   `);
   const TRIGGERS = `
@@ -21,6 +24,10 @@ function createApp(dbPath = ':memory:') {
     CREATE TRIGGER IF NOT EXISTS ledger_no_delete BEFORE DELETE ON ledger BEGIN SELECT RAISE(ABORT,'ledger is append-only'); END;`;
   db.exec(TRIGGERS);
   let counter = 41;
+  // parent grants: the ceiling a receipt may be minted under (spec §8: a receipt can never be wider than its grant)
+  const GRANTS = {
+    'G-ACME-1': { principal: 'priya', parent: 'parent-agent', tool: 'send_email', recipients: ['billing@acme.example'], invoice_ids: ['INV-123'], max_sends: 1 },
+  };
   const GENESIS = '0'.repeat(64);
   // mock Stripe fixture: the villain fixture lists Globex FIRST
   const INVOICES = [
@@ -39,13 +46,13 @@ function createApp(dbPath = ':memory:') {
     return { message_id: 'msg_' + r.lastInsertRowid, to, invoice_id };
   }
 
-  const rowHash = (prev, r) => sha(prev + JSON.stringify([r.ts, r.decision, r.reason, r.principal, r.parent, r.subagent, r.receipt_id, r.tool, r.args, r.op_id]));
+  const rowHash = (prev, r) => sha(prev + JSON.stringify([r.ts, r.decision, r.reason, r.principal, r.parent, r.subagent, r.receipt_id, r.tool, r.args, r.op_id, r.policy_rev]));
   function log(decision, reason, rc, receipt_id, tool, args, op_id) {
     const r = { ts: Date.now(), decision, reason, principal: rc?.principal ?? null, parent: rc?.parent ?? null,
-      subagent: rc?.subagent ?? null, receipt_id: receipt_id ?? null, tool: tool ?? null, args: JSON.stringify(args ?? null), op_id: op_id ?? null };
+      subagent: rc?.subagent ?? null, receipt_id: receipt_id ?? null, tool: tool ?? null, args: JSON.stringify(args ?? null), op_id: op_id ?? null, policy_rev: POLICY_REV };
     const prev = db.prepare('SELECT hash FROM ledger ORDER BY seq DESC LIMIT 1').get()?.hash ?? GENESIS;
-    db.prepare(`INSERT INTO ledger (ts,decision,reason,principal,parent,subagent,receipt_id,tool,args,op_id,prev_hash,hash)
-      VALUES (:ts,:decision,:reason,:principal,:parent,:subagent,:receipt_id,:tool,:args,:op_id,:prev_hash,:hash)`)
+    db.prepare(`INSERT INTO ledger (ts,decision,reason,principal,parent,subagent,receipt_id,tool,args,op_id,policy_rev,prev_hash,hash)
+      VALUES (:ts,:decision,:reason,:principal,:parent,:subagent,:receipt_id,:tool,:args,:op_id,:policy_rev,:prev_hash,:hash)`)
       .run({ ...r, prev_hash: prev, hash: rowHash(prev, r) });
   }
   // replay the chain from genesis; report the first row that does not match
@@ -60,17 +67,38 @@ function createApp(dbPath = ':memory:') {
   }
 
   function mint(b) {
-    const id = 'R-' + (++counter);
     const ttl = Number.isFinite(b.ttl_seconds) ? b.ttl_seconds : 600;
-    const r = { id, principal: b.principal || 'priya', parent: b.parent || 'parent-agent', subagent: b.subagent || 'subagent-1',
+    const r = { principal: b.principal || 'priya', parent: b.parent || 'parent-agent', subagent: b.subagent || 'subagent-1',
       tool: b.tool || 'send_email', recipient: typeof b.recipient === 'string' ? b.recipient.toLowerCase() : b.recipient, invoice_id: b.invoice_id,
-      max_sends: Number.isInteger(b.max_sends) ? b.max_sends : 1, expires_at: Date.now() + ttl * 1000 };
+      max_sends: Number.isInteger(b.max_sends) ? b.max_sends : 1, parent_grant_ref: b.parent_grant_ref ?? null, expires_at: Date.now() + ttl * 1000 };
     if (!r.recipient || !r.invoice_id) throw Object.assign(new Error('recipient and invoice_id required'), { status: 400 });
-    db.prepare(`INSERT INTO receipts (id,principal,parent,subagent,tool,recipient,invoice_id,max_sends,expires_at)
-      VALUES (:id,:principal,:parent,:subagent,:tool,:recipient,:invoice_id,:max_sends,:expires_at)`).run(r);
-    return getReceipt(id);
+    // wide-mint guard: the receipt must be present in, and no wider than, its parent grant
+    const g = GRANTS[r.parent_grant_ref];
+    const why = !r.parent_grant_ref ? 'no_parent_grant' : !g ? 'unknown_parent_grant'
+      : r.tool !== g.tool || !g.recipients.includes(r.recipient) || !g.invoice_ids.includes(r.invoice_id) || r.max_sends > g.max_sends || r.max_sends < 1
+        ? 'exceeds_parent_grant' : null;
+    if (why) { log('REFUSED_MINT', why, r, null, 'mint_receipt', { recipient: r.recipient, invoice_id: r.invoice_id, max_sends: r.max_sends, parent_grant_ref: r.parent_grant_ref });
+      throw Object.assign(new Error(why), { status: 403, body: { decision: 'REFUSED_MINT', reason: why } }); }
+    r.id = 'R-' + (++counter);
+    db.prepare(`INSERT INTO receipts (id,principal,parent,subagent,tool,recipient,invoice_id,max_sends,parent_grant_ref,expires_at)
+      VALUES (:id,:principal,:parent,:subagent,:tool,:recipient,:invoice_id,:max_sends,:parent_grant_ref,:expires_at)`).run(r);
+    return getReceipt(r.id);
   }
-  const getReceipt = (id) => db.prepare('SELECT * FROM receipts WHERE id=?').get(id);
+  // sends_so_far is DERIVED from ops rows, never stored. EXECUTED = completed; PENDING = reserved, upstream call in flight.
+  const sendsSoFar = (id) => db.prepare("SELECT COUNT(*) n FROM ops WHERE receipt_id=? AND status='EXECUTED'").get(id).n;
+  const reservedSends = (id) => db.prepare("SELECT COUNT(*) n FROM ops WHERE receipt_id=? AND status IN ('PENDING','EXECUTED')").get(id).n;
+  // Receipt lifecycle (V1-D-05): MINTED -> ACTIVE -> EXECUTED | EXPIRED | REVOKED. Derived, not stored.
+  //   MINTED  no call presented yet      ACTIVE   a call was presented, still usable
+  //   EXECUTED sends_so_far >= max_sends EXPIRED  past expires_at     REVOKED  parent revoked (wins over all)
+  function receiptState(rc, sends) {
+    if (rc.revoked) return 'REVOKED';
+    if (sends >= rc.max_sends) return 'EXECUTED';
+    if (Date.now() >= rc.expires_at) return 'EXPIRED';
+    const seen = db.prepare('SELECT 1 FROM ledger WHERE receipt_id=? LIMIT 1').get(rc.id);
+    return seen ? 'ACTIVE' : 'MINTED';
+  }
+  const getReceipt = (id) => { const rc = db.prepare('SELECT * FROM receipts WHERE id=?').get(id);
+    if (!rc) return rc; const n = sendsSoFar(id); return { ...rc, sends_so_far: n, state: receiptState(rc, n) }; };
 
   // ---- RECEIPT GATE: plain code, no Cedar ----
   function gate({ receipt_id, tool, args }) {
@@ -84,17 +112,22 @@ function createApp(dbPath = ':memory:') {
     if (Date.now() >= rc.expires_at) return refuse('expired');
     if (tool === 'delegate' || tool === 'mint_receipt') return refuse('redelegation_forbidden');
     const op_id = sha(receipt_id + tool + canon(args));
-    const prior = db.prepare('SELECT result FROM ops WHERE op_id=?').get(op_id);
-    if (prior) { log('REPLAYED', 'identical_retry', rc, receipt_id, tool, args, op_id);
+    const prior = db.prepare('SELECT status, result FROM ops WHERE op_id=?').get(op_id);
+    if (prior?.status === 'PENDING') return refuse('in_flight', op_id); // same op already reserved: never a second upstream call
+    if (prior?.status === 'EXECUTED') { log('REPLAYED', 'identical_retry', rc, receipt_id, tool, args, op_id);
       return { status: 200, body: { decision: 'REPLAYED', result: JSON.parse(prior.result) } }; }
     if (tool !== rc.tool) return refuse('tool_out_of_scope', op_id);
     if (args.to !== rc.recipient) return refuse('recipient_out_of_scope', op_id);
     if (args.invoice_id !== rc.invoice_id) return refuse('invoice_out_of_scope', op_id);
-    if (rc.sends >= rc.max_sends) return refuse('limit_exceeded', op_id);
-    // all checks passed: reserve the send, then call Gmail
-    db.prepare('UPDATE receipts SET sends=sends+1 WHERE id=?').run(receipt_id);
-    const result = gmailSend(args.to, args.invoice_id, 'gate');
-    db.prepare('INSERT INTO ops (op_id,receipt_id,result) VALUES (?,?,?)').run(op_id, receipt_id, JSON.stringify(result));
+    if (reservedSends(receipt_id) >= rc.max_sends) return refuse('limit_exceeded', op_id);
+    // all checks passed: write PENDING (unique on op_id) BEFORE forwarding upstream; a FAILED op may be retried
+    try { db.prepare("INSERT INTO ops (op_id,receipt_id,status) VALUES (?,?,'PENDING')").run(op_id, receipt_id); }
+    catch { if (prior?.status === 'FAILED') db.prepare("UPDATE ops SET status='PENDING' WHERE op_id=?").run(op_id); else return refuse('in_flight', op_id); }
+    let result;
+    try { opts.beforeSend?.(); result = gmailSend(args.to, args.invoice_id, 'gate'); }
+    catch (e) { db.prepare("UPDATE ops SET status='FAILED' WHERE op_id=?").run(op_id); // reservation released; sends_so_far unchanged
+      log('FAILED', 'upstream_error', rc, receipt_id, tool, args, op_id); return { status: 502, body: { decision: 'FAILED', reason: 'upstream_error' } }; }
+    db.prepare("UPDATE ops SET status='EXECUTED', result=? WHERE op_id=?").run(JSON.stringify(result), op_id);
     log('ALLOWED', 'in_scope', rc, receipt_id, tool, args, op_id);
     return { status: 200, body: { decision: 'ALLOWED', result } };
   }
@@ -113,7 +146,7 @@ function createApp(dbPath = ':memory:') {
   }
 
   const state = () => ({
-    receipts: db.prepare('SELECT * FROM receipts ORDER BY rowid').all(),
+    receipts: db.prepare('SELECT id FROM receipts ORDER BY rowid').all().map((r) => getReceipt(r.id)),
     ledger: db.prepare('SELECT * FROM ledger ORDER BY seq').all().map((r) => ({ ...r, args: JSON.parse(r.args) })),
     gmail: db.prepare('SELECT * FROM gmail ORDER BY id').all(),
     verify: verify(),
@@ -151,16 +184,19 @@ function createApp(dbPath = ':memory:') {
         const b = await readBody(req); return send(200, { decision: 'UNGOVERNED', result: gmailSend(b.to, b.invoice_id, 'direct_key') });
       }
       if (req.method === 'GET' && url.pathname === '/state') return send(200, state());
-      if (req.method === 'POST' && url.pathname === '/reset') { db.exec('DROP TRIGGER ledger_no_update; DROP TRIGGER ledger_no_delete; DELETE FROM receipts; DELETE FROM ops; DELETE FROM ledger; DELETE FROM gmail;'); db.exec(TRIGGERS); counter = 41; return send(200, state()); }
+      // DEMO ONLY: drops the append-only triggers to wipe the ledger. Disabled when NODE_ENV=production.
+      if (req.method === 'POST' && url.pathname === '/reset') {
+        if (process.env.NODE_ENV === 'production') return send(403, { error: 'reset_disabled_in_production' });
+        db.exec('DROP TRIGGER ledger_no_update; DROP TRIGGER ledger_no_delete; DELETE FROM receipts; DELETE FROM ops; DELETE FROM ledger; DELETE FROM gmail;'); db.exec(TRIGGERS); counter = 41; return send(200, { ...state(), demo_only: true }); }
       if (req.method === 'GET') {
         const f = path.join(__dirname, 'public', url.pathname === '/' ? 'index.html' : path.normalize(url.pathname).replace(/^(\.\.[/\\])+/, ''));
         if (f.startsWith(path.join(__dirname, 'public')) && fs.existsSync(f) && fs.statSync(f).isFile())
           return send(200, fs.readFileSync(f), f.endsWith('.html') ? 'text/html' : 'application/octet-stream');
       }
       send(404, { error: 'not_found' });
-    } catch (e) { send(e.status || 500, { error: e.message }); }
+    } catch (e) { send(e.status || 500, e.body || { error: e.message }); }
   });
-  return { server, db, TRIGGERS };
+  return { server, db, TRIGGERS, gate };
 }
 
 if (require.main === module) {
