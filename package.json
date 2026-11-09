@@ -3,6 +3,6 @@
   "version": "1.0.0",
   "private": true,
   "description": "Delegation Receipt V1 light build: receipt gate logic, UI + Node/SQLite backend, mock Gmail.",
-  "scripts": { "start": "node --no-warnings server.js", "test": "node --no-warnings --test test/gate.test.js" },
+  "scripts": { "start": "node --no-warnings server.js", "test": "node --no-warnings --test test/gate.test.js test/evidence.test.js" },
   "engines": { "node": ">=22.5" }
 }
