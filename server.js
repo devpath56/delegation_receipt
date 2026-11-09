@@ -37,7 +37,7 @@ function createApp(dbPath = ':memory:') {
 
   function mint(b) {
     const id = 'R-' + (++counter);
-    const ttl = Number.isFinite(b.ttl_seconds) ? b.ttl_seconds : 300;
+    const ttl = Number.isFinite(b.ttl_seconds) ? b.ttl_seconds : 600;
     const r = { id, principal: b.principal || 'priya', parent: b.parent || 'parent-agent', subagent: b.subagent || 'subagent-1',
       tool: b.tool || 'send_email', recipient: b.recipient, invoice_id: b.invoice_id,
       max_sends: Number.isInteger(b.max_sends) ? b.max_sends : 1, expires_at: Date.now() + ttl * 1000 };
