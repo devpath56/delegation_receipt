@@ -44,6 +44,15 @@ The receipt fixes the gap between those two:
 
 This is V1: the receipt *logic*, in a UI + Node/SQLite backend with mock Stripe and mock Gmail. It does **not** prove TrueForge spawn hooks, Gateway passthrough, Cedar context, or hosted subagent identity — that is V2. See Limits below.
 
+## Tradeoffs — the Staff PM decisions
+
+| Tradeoff | Chose | Gave up | Why |
+| --- | --- | --- | --- |
+| Depth vs breadth | One hop, one operation, one receipt | Multi-agent / multi-hop delegation | A second hop would make the demo unprovable in 3 minutes. The one-hop receipt is the thesis, not the whole product. |
+| Logic first, integration second | Plain-code gate + mock Gmail in V1 | TrueForge fork, Cedar, Gateway in V1 | Prove the *semantics* (refuse before execution, replay not re-send, cascade revocation) before paying the integration cost. Cedar is the V2 enforcement point, not the thing being proven. |
+| Exactly-once by reservation, not by counting | PENDING row before the upstream call; `sends_so_far` derived from EXECUTED rows, never stored | A simpler stored counter | A stored counter can disagree with the ledger if the send fails. Reservation + derivation can't: a failed send leaves the count at 0 and the reservation released. |
+| Honest bypass over a clean story | Keep the direct-key bypass in the demo (beat 9) | A demo with no visible failure mode | The receipt is enforcement *only if* credentials live in the gateway. A demo that hides its own failure mode isn't evidence, it's a pitch. |
+
 ## Demo walkthrough — reproduce in 3 minutes
 
 Start fresh, then follow the beats **in order**. No other setup is needed; every button is labelled exactly as shown. Counts below are cumulative Gmail sends / ledger rows as shown on screen 4 (Evidence).
